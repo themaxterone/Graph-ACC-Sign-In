@@ -35,25 +35,37 @@ ENTRA_ERRORS = {
     70043: "Session revoked or terminated by the administrator."
 }
 
-def get_access_token():
+def show_progress(step_name, current, total, bar_length=30):
+    """Renders an inline real-time progress bar with percentage."""
+    percent = float(current) * 100 / total if total > 0 else 100.0
+    filled = int(bar_length * current // total) if total > 0 else bar_length
+    bar = '█' * filled + '-' * (bar_length - filled)
+    sys.stdout.write(f"\r[+] {step_name:<28} |{bar}| {percent:6.1f}% ({current}/{total})")
+    sys.stdout.flush()
+    if current >= total:
+        sys.stdout.write("\n")
+
+def get_access_token(verbose=False):
     """Acquires a delegated OAuth2 access token interactively using PKCE."""
     app = msal.PublicClientApplication(
         CLIENT_ID,
         authority=AUTHORITY
     )
     
-    print("\nOpening the browser for authentication...")
+    if verbose:
+        print("\nOpening the browser for authentication...")
     result = app.acquire_token_interactive(
         scopes=SCOPES,
         prompt="select_account"
     )
     
     if "access_token" in result:
-        print("[+] Authentication successful.")
+        if verbose:
+            print("[+] Authentication successful.")
         return result["access_token"]
     else:
         error_msg = result.get("error_description", result.get("error"))
-        print(f"\033[91m[!] Authentication error: {error_msg}\033[0m")
+        print(f"\n\033[91m[!] Authentication error: {error_msg}\033[0m")
         sys.exit(1)
 
 def parse_event(event):
@@ -402,11 +414,13 @@ def export_to_html(filename, user, days, records):
     except Exception as e:
         print(f"\033[91m[!] Error exporting HTML: {e}\033[0m")
 
-def get_user_signins(user, days=15):
-    # Enforce lowercase and trim spaces
+def get_user_signins(user, days=15, verbose=False):
     user = user.strip().lower()
 
-    token = get_access_token()
+    if not verbose:
+        show_progress("1/4 Authentication", 1, 1)
+
+    token = get_access_token(verbose)
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
@@ -419,42 +433,66 @@ def get_user_signins(user, days=15):
     url = f"https://graph.microsoft.com/v1.0/auditLogs/signIns?$filter={odata_filter}&$top=100"
 
     all_events = []
-    print(f"\nQuerying sign-in logs for '{user}' (last {days} days, since {filter_date})...")
+    if verbose:
+        print(f"\n[+] Querying sign-in logs for '{user}' (last {days} days, since {filter_date})...")
 
     while url:
         try:
+            if not verbose:
+                show_progress("2/4 Fetching Graph logs", len(all_events), len(all_events) + 100)
             response = requests.get(url, headers=headers, verify=False)
             response.raise_for_status()
             data = response.json()
-            all_events.extend(data.get("value", []))
+            batch = data.get("value", [])
+            all_events.extend(batch)
             url = data.get("@odata.nextLink", None)
         except requests.exceptions.RequestException as e:
-            print(f"\033[91m[!] Microsoft Graph API error: {e}\033[0m")
+            print(f"\n\033[91m[!] Microsoft Graph API error: {e}\033[0m")
             if hasattr(e, 'response') and e.response is not None:
                 print(f"Details: {e.response.text}")
             break
 
-    parsed_records = [parse_event(ev) for ev in all_events]
+    if not verbose:
+        show_progress("2/4 Fetching Graph logs", len(all_events), len(all_events))
 
-    print("\n" + "=" * 80)
-    print(f" TOTAL SIGN-IN EVENTS FOUND ({days} DAYS): {len(parsed_records)}")
-    print("=" * 80)
-
-    if not parsed_records:
-        print(f"No sign-in events found for '{user}' in the last {days} days.")
+    if not all_events:
+        print(f"\nNo sign-in events found for '{user}' in the last {days} days.")
         return
 
-    for r in parsed_records:
-        if r["is_success"]:
-            status_text = "\033[92mSuccess\033[0m"
-        else:
-            status_text = f"\033[91mFailure (Code: {r['error_code']})\033[0m\n  ↳ \033[2mReason: {r['failure_desc']}\033[0m"
+    parsed_records = [parse_event(ev) for ev in all_events]
 
-        print(f"[{r['datetime']}] {r['user']} | {r['app']}")
-        print(f"  Status  : {status_text}")
-        print(f"  IP/Loc  : {r['ip']} ({r['location']}) | OS: {r['os']} | Browser: {r['browser']}")
-        print(f"  CA      : {r['ca']}")
-        print("-" * 80)
+    # Imprimir registros individuales solo si -v está habilitado
+    if verbose:
+        print("\n" + "=" * 80)
+        print(f" TOTAL SIGN-IN EVENTS FOUND ({days} DAYS): {len(parsed_records)}")
+        print("=" * 80)
+        for r in parsed_records:
+            if r["is_success"]:
+                status_text = "\033[92mSuccess\033[0m"
+            else:
+                status_text = f"\033[91mFailure (Code: {r['error_code']})\033[0m\n  ↳ \033[2mReason: {r['failure_desc']}\033[0m"
+
+            print(f"[{r['datetime']}] {r['user']} | {r['app']}")
+            print(f"  Status  : {status_text}")
+            print(f"  IP/Loc  : {r['ip']} ({r['location']}) | OS: {r['os']} | Browser: {r['browser']}")
+            print(f"  CA      : {r['ca']}")
+            print("-" * 80)
+
+    # Cálculo del resumen final
+    total_logins = len(parsed_records)
+    success_logins = sum(1 for r in parsed_records if r["is_success"])
+    failed_logins = total_logins - success_logins
+    unique_ips = len(set(r["ip"] for r in parsed_records if r["ip"] and r["ip"] != "N/A"))
+
+    # Cuadro resumen siempre presente al final
+    print("\n" + "=" * 85)
+    print(f" SIGN-IN EVENTS SUMMARY ({days} DAYS) | UNIQUE IPs CHECKED: {unique_ips}")
+    print("=" * 85)
+    print(f" Total Logins   : {total_logins}")
+    print(f" Successful     : \033[92m{success_logins}\033[0m")
+    print(f" Failed         : \033[91m{failed_logins}\033[0m")
+    print(f" Unique IPs     : {unique_ips}")
+    print("=" * 85 + "\n")
 
     user_slug = user.replace("@", "_").replace(".", "_")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -462,13 +500,19 @@ def get_user_signins(user, days=15):
     csv_filename = f"signins_{user_slug}_{days}d_{timestamp}.csv"
     html_filename = f"signins_{user_slug}_{days}d_{timestamp}.html"
 
+    if not verbose:
+        show_progress("3/4 Exporting CSV", 1, 1)
     export_to_csv(csv_filename, parsed_records)
+
+    if not verbose:
+        show_progress("4/4 Exporting HTML", 1, 1)
     export_to_html(html_filename, user, days, parsed_records)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Query Microsoft Graph sign-in logs and export to CSV + interactive HTML.")
     parser.add_argument("-u", "--user", required=True, help="UserPrincipalName / corporate email of the user")
     parser.add_argument("-d", "--days", type=int, default=15, help="Number of past days to query (default: 15)")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose mode: Print full event-by-event details to terminal")
     args = parser.parse_args()
 
-    get_user_signins(args.user.strip().lower(), args.days)
+    get_user_signins(args.user.strip().lower(), args.days, args.verbose)
