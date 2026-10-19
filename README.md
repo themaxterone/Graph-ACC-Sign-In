@@ -36,6 +36,7 @@ A security-focused Python utility designed for SOC analysts, incident responders
 2. **OData Query Construction**: A UTC-based cutoff timestamp is calculated using the configured day offset. An OData filter string is formed:
    ```text
    userPrincipalName eq '<user>' and createdDateTime ge <UTC_DATE>
+   ```
    
 ---
    
